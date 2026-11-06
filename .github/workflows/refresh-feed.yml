@@ -1,0 +1,36 @@
+name: Refresh signed preview feed
+on:
+  schedule:
+    - cron: '23 9 * * 1,4'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: shadercam-preview-feed
+  cancel-in-progress: false
+jobs:
+  refresh:
+    if: github.repository == 'thomas-mardis/shadercam-desktop-releases'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Find current preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh api repos/thomas-mardis/shadercam-desktop-releases/releases --jq '[.[] | select(.draft == false and any(.assets[]; .name == "shadercam.preview.json"))][0].tag_name')
+          test -n "$tag" && test "$tag" != null
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          mkdir feed
+          gh release download "$tag" --repo thomas-mardis/shadercam-desktop-releases --pattern releases.preview.json --dir feed
+      - name: Renew signature
+        env:
+          FEED_KEY: ${{ secrets.SHADERCAM_FEED_SIGNING_KEY }}
+        run: node renew-feed.cjs feed
+      - name: Upload renewed metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" feed/shadercam.preview.json feed/shadercam.preview.json.sig --clobber --repo thomas-mardis/shadercam-desktop-releases
