@@ -1,0 +1,62 @@
+name: Windows installer smoke
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published preview tag
+        default: v0.2.3
+        required: true
+permissions:
+  contents: read
+jobs:
+  install:
+    if: github.repository == 'thomas-mardis/shadercam-desktop-releases'
+    runs-on: windows-latest
+    steps:
+      - name: Download published installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release download $env:RELEASE_TAG --repo thomas-mardis/shadercam-desktop-releases --pattern '*Setup.exe' --dir installer
+          if($LASTEXITCODE){throw 'Installer download failed'}
+      - name: Install, verify shortcuts, uninstall
+        shell: pwsh
+        run: |
+          if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows'){throw 'Restricted to disposable Windows Actions runners'}
+          $root=Join-Path $env:RUNNER_TEMP 'shadercam-install-smoke'
+          $setup=(Get-ChildItem installer -Filter '*Setup.exe' | Select-Object -First 1).FullName
+          $result=[ordered]@{setup_sha256=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash}
+          $process=Start-Process -FilePath $setup -ArgumentList ('--silent --installto "'+$root+'"') -WindowStyle Hidden -PassThru
+          if(-not $process.WaitForExit(90000)){throw 'Installer timed out'}
+          if($process.ExitCode -ne 0){throw "Installer exit $($process.ExitCode)"}
+          $app=Join-Path $root 'current/shadercam-desktop.exe'
+          if(-not(Test-Path -LiteralPath $app)){throw 'Installed executable missing'}
+          $result.installed_version=(Get-Item -LiteralPath $app).VersionInfo.ProductVersion
+          $shell=New-Object -ComObject WScript.Shell
+          $menu=Join-Path ([Environment]::GetFolderPath('Programs')) 'ShaderCam'
+          foreach($name in 'ShaderCam Studio.lnk','ShaderCam Meeting Camera.lnk'){
+            $shortcut=Join-Path $menu $name
+            if(-not(Test-Path -LiteralPath $shortcut)){throw "Missing shortcut $name"}
+            if(-not $shell.CreateShortcut($shortcut).TargetPath.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Shortcut has unexpected target'}
+          }
+          $result.shortcuts='passed'
+          $config=Get-Content -LiteralPath (Join-Path $root 'current/resources/release-config.json') -Raw | ConvertFrom-Json
+          if($config.github_repository -ne 'thomas-mardis/shadercam-desktop-releases'){throw 'Wrong update repository installed'}
+          $result.update_repository=$config.github_repository
+          # Only processes inside this disposable runner's checked install root.
+          Get-Process shadercam-desktop -ErrorAction SilentlyContinue | Where-Object {$_.Path -and $_.Path.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)} | Stop-Process -Force
+          $uninstall=Start-Process -FilePath (Join-Path $root 'Update.exe') -ArgumentList '--silent','uninstall' -WindowStyle Hidden -PassThru
+          if(-not $uninstall.WaitForExit(60000)){throw 'Uninstall timed out'}
+          if($uninstall.ExitCode -ne 0 -or (Test-Path -LiteralPath $app)){throw 'Uninstall failed'}
+          foreach($name in 'ShaderCam Studio.lnk','ShaderCam Meeting Camera.lnk'){
+            if(Test-Path -LiteralPath (Join-Path $menu $name)){throw "Uninstall retained $name"}
+          }
+          $result.uninstall='passed'
+          $result.runtime_rendering='Not tested on the hosted runner'
+          $result | ConvertTo-Json | Set-Content installer-smoke.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-smoke-evidence
+          path: installer-smoke.json
